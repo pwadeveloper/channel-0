@@ -1,0 +1,15 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Started by Termux:Boot. Keeps the Channel 0 server and Home watcher running.
+termux-wake-lock
+cd "$HOME/channel-0/server" || exit 1
+# Your settings: the TV's address, plus the optional ones from the README.
+export HISENSE_HOST=192.168.1.50
+export LAUNCHER_DESIGN=8 LAUNCHER_NAME=
+export WEATHER_CITY=London WEATHER_LAT=51.5072 WEATHER_LON=-0.1276
+export LAUNCHER_APP_NAME=Launcher
+pkill -f tvsite_server.py; pkill -f home_watch.py
+SLOG="$HOME/channel0-server.log"; WLOG="$HOME/channel0-watch.log"
+(while true; do python -u tvsite_server.py launcher 8765 >> "$SLOG" 2>&1; sleep 3; done) &
+(while true; do python -u home_watch.py >> "$WLOG" 2>&1; sleep 3; done) &
+# The server logs every request; keep the logs small.
+(while true; do sleep 3600; for f in "$SLOG" "$WLOG"; do [ "$(wc -c < "$f")" -gt 5000000 ] && : > "$f"; done; done) &

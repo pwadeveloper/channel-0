@@ -21,12 +21,15 @@ DEFAULT_HOST = os.environ.get("HISENSE_HOST")
 DEFAULT_PORT = 36669
 HOST_CACHE = os.path.join(HERE, ".host")
 AUTH_FILE = os.path.join(HERE, ".auth.json")
+APPS_FILE = os.path.join(HERE, ".apps.json")
 
 # Dynamic ("modern") login, ported from pyvidaa (MIT, Warren Rees):
 # https://github.com/warrenrees/pyvidaa
 _PATTERN = "38D65DC30F45109A369A86FCE866A85B"
 _VALUE_SUFFIX = "h!i@s#$v%i^d&a*a"
 _TIME_XOR = 0x5698_1477_2b03_a968
+# Older firmware rejects the dynamic login but takes the RemoteNow app's fixed one, then pairs by PIN alone (no tokens).
+LEGACY_LOGIN = ("hisenseservice", "multimqttservice")
 
 
 def _md5(s):
@@ -55,6 +58,22 @@ def _save_auth(auth):
     with open(AUTH_FILE, "w") as f:
         json.dump(auth, f, indent=2)
     os.chmod(AUTH_FILE, 0o600)
+
+
+def _load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _save_json(path, data):
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except OSError:
+        pass
 
 
 def _cached_host():
@@ -137,7 +156,10 @@ class HisenseTV:
 
         now = time.time()
         self._refresh_on_connect = False
-        if self._auth.get("accesstoken") and now < self._auth.get("access_expires", 0):
+        if self._auth.get("legacy"):
+            self.client_id = self._auth["uuid"]
+            username, password = LEGACY_LOGIN
+        elif self._auth.get("accesstoken") and now < self._auth.get("access_expires", 0):
             self.client_id = self._auth["client_id"]
             username, password = self._auth["username"], self._auth["accesstoken"]
         elif self._auth.get("refreshtoken") and now < self._auth.get("refresh_expires", 0):
@@ -146,8 +168,14 @@ class HisenseTV:
             self._refresh_on_connect = True
         else:
             self.client_id, username, password = dynamic_credentials(self._auth["uuid"])
-        self._device = self.client_id
+        self._make_client(username, password)
 
+    @property
+    def legacy(self):
+        return bool(self._auth.get("legacy"))
+
+    def _make_client(self, username, password):
+        self._device = self.client_id
         self._c = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2, client_id=self.client_id
         )
@@ -206,6 +234,10 @@ class HisenseTV:
                 payload = json.loads(payload.decode("utf-8", "strict"))
             except (ValueError, UnicodeDecodeError):
                 payload = msg.payload
+        if msg.topic.endswith("/ui_service/actions/remote_launcher"):
+            # Older firmware signals the home screen with this empty broadcast instead of a state payload.
+            payload = {"statetype": "remote_launcher"}
+            self.state = payload
         if isinstance(payload, dict):
             if msg.topic.endswith("/volumechange"):
                 if payload.get("volume_type") == 2:
@@ -213,6 +245,8 @@ class HisenseTV:
                 elif payload.get("volume_type") == 0:
                     self.volume = int(payload.get("volume_value", 0))
             elif msg.topic.endswith("/ui_service/state") and "statetype" in payload:
+                if self.legacy and msg.retain:
+                    return  # older firmware keeps replaying its last state on connect, long after it changed
                 self.state = payload
             elif msg.topic.endswith("/tokenissuance") and payload.get("accesstoken"):
                 self._store_token(payload)
@@ -229,6 +263,13 @@ class HisenseTV:
             _t.sleep(0.1)
         if self.connect_error:
             self.disconnect()
+            if self.connect_error == "Not authorized" and not self.legacy and not self._auth.get("refreshtoken"):
+                # Dynamic login refused: this is older firmware. Remember it and retry with the fixed login.
+                self._auth["legacy"] = True
+                _save_auth(self._auth)
+                self.client_id = self._auth["uuid"]
+                self._make_client(*LEGACY_LOGIN)
+                return self.connect()
             raise ConnectionError(f"TV refused MQTT login: {self.connect_error}")
         _remember_host(self.host)
         if self._refresh_on_connect:
@@ -252,7 +293,7 @@ class HisenseTV:
 
     @property
     def paired(self):
-        return bool(self._auth.get("accesstoken"))
+        return bool(self._auth.get("accesstoken") or self._auth.get("paired"))
 
     def disconnect(self):
         try:
@@ -283,11 +324,19 @@ class HisenseTV:
         if isinstance(payload, dict):
             payload = json.dumps(payload)
         topic = f"/remoteapp/tv/{service}/{self._device}/{kind}/{action}"
-        self._c.publish(topic, payload).wait_for_publish()
+        info = self._c.publish(topic, payload)
+        # Without a timeout this blocks forever once another client has kicked this session off the TV.
+        info.wait_for_publish(timeout=5)
+        if not info.is_published():
+            raise ConnectionError(f"TV did not take {action}")
 
     def start_authorization(self):
         """Trigger the TV to display the 4-digit pairing code."""
         self._drain()
+        if self.legacy:
+            # Older firmware shows the PIN when an unpaired client asks for state.
+            self._call("ui_service", "gettvstate")
+            return
         self._call("ui_service", "vidaa_app_connect",
                    {"app_version": 2, "connect_result": 0, "device_type": "Mobile App"})
 
@@ -301,6 +350,17 @@ class HisenseTV:
                 raise RuntimeError(f"authorization failed: {payload}")
         except TimeoutError:
             pass  # some firmware never confirms the PIN; the token below is the real test
+        if self.legacy:
+            # Older firmware authorizes the client id itself; a state reply instead of another PIN prompt proves it.
+            self._call("ui_service", "authenticationcodeclose", "")
+            self._drain()
+            self._call("ui_service", "gettvstate")
+            topic, _ = self._wait(match=lambda t, p: t.endswith("/authentication") or (isinstance(p, dict) and "statetype" in p))
+            if topic.endswith("/authentication"):
+                raise RuntimeError("TV still asks for a PIN; the code was not accepted")
+            self._auth["paired"] = True
+            _save_auth(self._auth)
+            return True
         # The PIN only authorizes this session; the token is what lets us back in.
         self._subscribe()
         time.sleep(1)
@@ -327,13 +387,23 @@ class HisenseTV:
         if self.apps is None:
             self._drain()
             self._call("ui_service", "applist")
-            _, payload = self._wait(match=lambda t, p: isinstance(p, list))
+            try:
+                _, payload = self._wait(match=lambda t, p: isinstance(p, list), timeout=6)
+            except TimeoutError:
+                # Older firmware doesn't answer while a web app (like the launcher itself) is in front;
+                # fall back to the last list it gave us.
+                self.apps = _load_json(APPS_FILE)
+                if self.apps is None:
+                    raise
+                return self.apps
             self.apps = [a for a in payload if isinstance(a, dict) and a.get("name")]
+            _save_json(APPS_FILE, self.apps)
         return self.apps
 
     def find_app(self, name, _refreshed=False):
         want = name.strip().lower()
-        apps = self.app_list()
+        # Entries the TV marks uninstalled (e.g. a failed web-app install) can't be launched.
+        apps = [a for a in self.app_list() if not a.get("isunInstalled")]
         for a in apps:
             if a["name"].lower() == want:
                 return a
@@ -384,6 +454,8 @@ class HisenseTV:
                 self._state_at = time.time()
             except TimeoutError:
                 if self.state is None:
-                    raise
+                    if not self.legacy:
+                        raise
+                    self.state = {"statetype": "unknown"}  # older firmware can stay silent; broadcasts fill it in
                 self._state_at = time.time() + 4   # no answer: back off, broadcasts still keep it current
         return self.state

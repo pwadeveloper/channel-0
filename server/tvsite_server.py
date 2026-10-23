@@ -64,7 +64,13 @@ DESIGN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".design"
 DESIGNS = {"1": "future.html", "2": "d2-console.html", "3": "d3-widgets.html", "4": "d4-acid.html", "5": "d5-carousel.html", "6": "d5b-carousel.html", "7": "d6-space.html", "8": "d7-nothing.html"}
 
 
+FIXED_DESIGN = os.environ.get("LAUNCHER_DESIGN")      # e.g. "8": Home always opens this design, whatever was picked last
+GREETING_NAME = os.environ.get("LAUNCHER_NAME", "")  # who the designs greet, unless the URL names someone
+
+
 def current_design():
+    if FIXED_DESIGN in DESIGNS and os.path.exists(os.path.join(ROOT, DESIGNS[FIXED_DESIGN])):
+        return DESIGNS[FIXED_DESIGN]
     try:
         with open(DESIGN_FILE) as f:
             choice = DESIGNS.get(f.read().strip(), DESIGNS["1"])
@@ -278,8 +284,11 @@ def sources():
     r = backend_rpc.handle("sources", None)
     if not r.get("ok"):
         return r
-    data = [{"id": s.get("sourceid"), "name": s.get("displayname") or s.get("sourcename"),
-             "signal": s.get("is_signal") == "1"} for s in r["data"]]
+    # Older firmware numbers its sources ("4" is HDMI1); the designs pick inputs out by id, so give them the name.
+    # switch_source accepts either.
+    data = [{"id": s.get("sourcename") if str(s.get("sourceid", "")).isdigit() else s.get("sourceid"),
+             "name": s.get("displayname") or s.get("sourcename"),
+             "signal": str(s.get("is_signal")) == "1"} for s in r["data"]]
     return {"ok": True, "data": data}
 
 
@@ -343,7 +352,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(sources())
         if u.path == "/api/launch":
             LAST_ACTION[0] = time.time()
-            return self._json(backend_rpc.handle("launch", q.get("name", "")))
+            # fresh=1 closes what's in front first (the home watcher uses it to get past VIDAA's home overlay).
+            return self._json(backend_rpc.handle("launch_fresh" if q.get("fresh") else "launch", q.get("name", "")))
         if u.path == "/api/source":
             LAST_ACTION[0] = time.time()
             return self._json(switch_source(q.get("id", "")))
@@ -377,6 +387,8 @@ class Handler(SimpleHTTPRequestHandler):
                 with open(DESIGN_FILE, "w") as f:
                     f.write(q["set"])
             return self._json({"ok": True, "data": current_design()})
+        if u.path == "/api/name":
+            return self._json({"ok": True, "data": GREETING_NAME})
         if u.path == "/":
             # The TV app is installed with the bare URL; serve the chosen design there.
             self.path = "/" + current_design()

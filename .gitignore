@@ -11,3 +11,5 @@ server/.auth.json
 server/.design
 server/.youtube_last.json
 server/keys/https/
+server/.apps.json
+*.log

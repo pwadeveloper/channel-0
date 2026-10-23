@@ -117,9 +117,31 @@ To pause the takeover, create an empty file `server/.home_watch_off`. Delete it 
 | Setting | How |
 |---|---|
 | Weather location | `WEATHER_CITY=Paris WEATHER_LAT=48.85 WEATHER_LON=2.35` when starting the server |
-| Greeting name (Nothing design) | Open `d7-nothing.html?name=YourName` |
+| Greeting name (Nothing design) | Open `d7-nothing.html?name=YourName`, or start the server with `LAUNCHER_NAME=YourName` |
+| Always open one design | `LAUNCHER_DESIGN=8` when starting the server: Home always opens that design, whatever was picked last |
+| Installed app name | `LAUNCHER_APP_NAME=Launcher` for both the server and `home_watch.py`: the name the launcher was installed under |
 | Voice search from your phone | Run `mkdir -p server/keys/https && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj /CN=channel-0 -keyout server/keys/https/key.pem -out server/keys/https/cert.pem`, then restart the server. The voice page runs on port 8766. |
 | Preview a design on your computer | `http://localhost:8765/<design>.html` |
+
+### Older VIDAA firmware
+
+Some TVs (for example software `V0000.01.00a`) refuse the dynamic login with "Not authorized" but take the RemoteNow keys and the app's fixed login. `tv.py` detects this, falls back, and pairs by PIN alone (the PIN appears when the server first asks for state). On these TVs:
+
+- VIDAA's home screen is an overlay, so the watcher presses Exit before opening the launcher.
+- Opening a URL the TV hasn't installed shows "Install to app screen". Choose Install once (with the watcher paused via `server/.home_watch_off`). The TV then stores the URL as `http:host:port`, and the server opens it in that form.
+- The TV may stop answering the app list; the server falls back to the last list it saved in `server/.apps.json`.
+
+### Running it on an Android or Google TV box
+
+Any always-on Android box on the same network can replace the computer. Install [Termux](https://github.com/termux/termux-app/releases) and [Termux:Boot](https://github.com/termux/termux-boot/releases) (both GitHub builds), open each once, then in Termux:
+
+```sh
+pkg install python && pip install paho-mqtt
+# copy this repo, including server/keys/ and server/.auth.json, to ~/channel-0
+mkdir -p ~/.termux/boot && cp ~/channel-0/deploy/termux/start-channel0 ~/.termux/boot/
+```
+
+Edit the settings at the top of `start-channel0`, then reboot the box. The script holds a wake lock, restarts the server and watcher if they exit, and keeps their logs small. Exempt Termux from battery optimisation, and on Android 12+ turn off the child-process limit (`adb shell settings put global settings_enable_monitor_phantom_procs false`).
 
 ## Repo layout
 

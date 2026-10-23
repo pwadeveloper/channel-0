@@ -11,12 +11,13 @@ import time
 import urllib.parse
 import urllib.request
 
-APP = "HisenseBar"
+APP = os.environ.get("LAUNCHER_APP_NAME", "HisenseBar")   # the name it was installed under via hisense://debug
 API = os.environ.get("HISENSE_API", "http://127.0.0.1:8765")
 POLL = 1.0
 COOLDOWN = 4.0
 QUIET_AFTER_ACTION = 8.0   # opening an app passes through the VIDAA home screen; don't pounce on it
 HOME_CONFIRMS = 2          # home must be seen on this many polls in a row
+MAX_RETRIES, RETRY_WINDOW, BACKOFF = 3, 45.0, 120.0   # stuck launches: stop retrying so the remote stays usable
 OFF_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".home_watch_off")
 
 
@@ -47,8 +48,15 @@ def main():
     last_launch = 0.0
     last_status = None
     home_seen = 0
+    recent = []   # launch times; a launcher that never comes up would otherwise be retried every few seconds
     while True:
         try:
+            recent = [t for t in recent if time.time() - t < RETRY_WINDOW]
+            if len(recent) >= MAX_RETRIES:
+                log(f"launcher didn't come up after {MAX_RETRIES} tries; leaving the TV alone for {BACKOFF:.0f}s")
+                recent = []
+                time.sleep(BACKOFF)
+                continue
             r = api("/api/state")
             status = "connected" if r.get("ok") else f"waiting for TV ({r.get('error')})"
             if status != last_status:
@@ -60,7 +68,8 @@ def main():
                     and time.time() - last_launch > COOLDOWN):
                 home_seen = 0
                 last_launch = time.time()
-                res = api("/api/launch?name=" + urllib.parse.quote(APP))
+                recent.append(last_launch)
+                res = api("/api/launch?fresh=1&name=" + urllib.parse.quote(APP))
                 if not res.get("ok"):
                     # Not installed via hisense://debug: open it by URL instead.
                     res = api("/api/open?url=" + urllib.parse.quote(launcher_url(), safe=""))

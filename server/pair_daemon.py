@@ -7,6 +7,7 @@ from tv import HisenseTV
 HERE = os.path.dirname(os.path.abspath(__file__))
 CODE_FILE = os.path.join(HERE, ".paircode")
 RESULT_FILE = os.path.join(HERE, ".pairresult")
+TIMEOUT = int(os.environ.get("PAIR_TIMEOUT", "180"))
 
 
 def log(msg):
@@ -25,9 +26,9 @@ def main():
 
     tv.start_authorization()
     log("sent gettvstate -> TV should now show a 4-digit code on screen")
-    log(f"waiting for code in {CODE_FILE} (up to 180s) ...")
+    log(f"waiting for code in {CODE_FILE} (up to {TIMEOUT}s) ...")
 
-    deadline = time.time() + 180
+    deadline = time.time() + TIMEOUT
     code = None
     while time.time() < deadline:
         if os.path.exists(CODE_FILE):
